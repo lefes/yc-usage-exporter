@@ -1,5 +1,6 @@
 // TODO: Add proper logging
 // TODO: Refactor error handling
+// TODO: Separate functions to smaller ones for better reusability
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/resourcemanager/v1"
+	"github.com/yandex-cloud/go-genproto/yandex/cloud/storage/v1"
 	ycsdk "github.com/yandex-cloud/go-sdk"
 	"gopkg.in/yaml.v2"
 )
@@ -168,12 +170,36 @@ func exportToCSV(resources []Folder) {
 				disc += disk.Size / (1 << 30)
 			}
 		}
-		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n"})
+		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n" + "S3 - " + strconv.Itoa(folder.S3size) + " гб\n"})
 		if err != nil {
 			panic(err)
 		}
 	}
+}
 
+func getS3size(ctx context.Context, folders []Folder) ([]Folder, error) {
+	token := getToken()
+	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
+		Credentials: ycsdk.OAuthToken(token),
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, folder := range folders {
+		actualFolder := &folders[i]
+		s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
+		if err != nil {
+			return nil, err
+		}
+		for _, bucket := range s3.Buckets {
+			size, err := sdk.StorageAPI().Bucket().GetStats(ctx, &storage.GetBucketStatsRequest{Name: bucket.Name})
+			if err != nil {
+				return nil, err
+			}
+			actualFolder.S3size += int(size.UsedSize / (1 << 30))
+		}
+	}
+	return folders, nil
 }
 
 func main() {
@@ -186,6 +212,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	computeResources, err = getS3size(ctx, computeResources)
+	if err != nil {
+		panic(err)
+	}
+
 	exportToCSV(computeResources)
 
 }
