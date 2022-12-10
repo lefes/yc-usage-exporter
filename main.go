@@ -1,3 +1,5 @@
+// TODO: Add proper logging
+// TODO: Refactor error handling
 package main
 
 import (
@@ -25,13 +27,21 @@ type YandexCreds struct {
 	} `yaml:"profiles"`
 }
 
+type Folder struct {
+	Name           string
+	Id             string
+	Instances      []Instance `json:"instances"`
+	S3size         int
+	IpCount        int
+	InternetEgress int
+}
+
 type Instance struct {
-	FolderName string
-	Name       string
-	CPU        int
-	Memory     int
-	Fraction   int
-	Disks      []Disk
+	Name     string
+	CPU      int
+	Memory   int
+	Fraction int
+	Disks    []Disk
 }
 
 type Disk struct {
@@ -57,7 +67,7 @@ func getToken() string {
 
 // TODO: Add pagination support
 // TODO: Add support to muiltiple clouds
-func getFoldersList(ctx context.Context) ([]*resourcemanager.Folder, error) {
+func getFoldersList(ctx context.Context) ([]Folder, error) {
 	token := getToken()
 	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
 		Credentials: ycsdk.OAuthToken(token),
@@ -69,20 +79,27 @@ func getFoldersList(ctx context.Context) ([]*resourcemanager.Folder, error) {
 	if err != nil {
 		return nil, err
 	}
-	folders := make([]*resourcemanager.Folder, 0)
+	folders := make([]Folder, 0)
 	for _, cloud := range clouds.Clouds {
 		cloudFolders, err := sdk.ResourceManager().Folder().List(ctx, &resourcemanager.ListFoldersRequest{CloudId: cloud.Id})
 		if err != nil {
 			return nil, err
 		}
-		folders = append(folders, cloudFolders.Folders...)
+		for _, folder := range cloudFolders.Folders {
+
+			folders = append(folders, Folder{
+				Name: folder.Name,
+				Id:   folder.Id,
+			})
+		}
+
 	}
 	return folders, nil
 }
 
 // TODO: Add pagination support
 // TODO: Add goroutines with throttling and dynamic number of goroutines with default value
-func getComputeResources(ctx context.Context, folders []*resourcemanager.Folder) (map[string][]Instance, error) {
+func getComputeResources(ctx context.Context, folders []Folder) ([]Folder, error) {
 	token := getToken()
 	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
 		Credentials: ycsdk.OAuthToken(token),
@@ -90,19 +107,18 @@ func getComputeResources(ctx context.Context, folders []*resourcemanager.Folder)
 	if err != nil {
 		return nil, err
 	}
-	instances := make(map[string][]Instance)
-	for _, folder := range folders {
+	for i, folder := range folders {
+		actualFolder := &folders[i]
 		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
 		if err != nil {
 			return nil, err
 		}
 		for _, computeResource := range computeResources.Instances {
 			instance := Instance{
-				FolderName: folder.Name,
-				Name:       computeResource.Name,
-				CPU:        int(computeResource.Resources.Cores),
-				Memory:     int(computeResource.Resources.Memory),
-				Fraction:   int(computeResource.Resources.CoreFraction),
+				Name:     computeResource.Name,
+				CPU:      int(computeResource.Resources.Cores),
+				Memory:   int(computeResource.Resources.Memory),
+				Fraction: int(computeResource.Resources.CoreFraction),
 			}
 			// Getting boot disk size
 			bootDisk, err := sdk.Compute().Disk().Get(ctx, &compute.GetDiskRequest{DiskId: computeResource.BootDisk.DiskId})
@@ -124,16 +140,15 @@ func getComputeResources(ctx context.Context, folders []*resourcemanager.Folder)
 					Size: int(secondaryDisk.Size),
 				})
 			}
-
-			instances[folder.Id] = append(instances[folder.Id], instance)
+			actualFolder.Instances = append(actualFolder.Instances, instance)
 		}
 	}
-	return instances, nil
+	return folders, nil
 }
 
 // TODO: get out calculation of resources to separate function
 // TODO: Add option to set output file name
-func exportToCSV(resources map[string][]Instance) {
+func exportToCSV(resources []Folder) {
 	f, err := os.Create("instances.csv")
 	if err != nil {
 		panic(err)
@@ -146,14 +161,14 @@ func exportToCSV(resources map[string][]Instance) {
 		cpus := 0
 		memory := 0
 		disc := 0
-		for _, instance := range folder {
+		for _, instance := range folder.Instances {
 			cpus += instance.CPU * (instance.Fraction / 100)
 			memory += instance.Memory / (1 << 30)
 			for _, disk := range instance.Disks {
 				disc += disk.Size / (1 << 30)
 			}
 		}
-		err := w.Write([]string{folder[0].FolderName, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n"})
+		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n"})
 		if err != nil {
 			panic(err)
 		}
