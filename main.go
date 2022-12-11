@@ -1,6 +1,9 @@
 // TODO: Add proper logging
 // TODO: Refactor error handling
 // TODO: Separate functions to smaller ones for better reusability
+// TODO: Refactor passing of structer []Folder to functions
+// Maybe it's better to pass it as pointer?
+// Maybe TODO: bind some of the functions to Folder struct?
 package main
 
 import (
@@ -12,6 +15,7 @@ import (
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/resourcemanager/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/storage/v1"
+	"github.com/yandex-cloud/go-genproto/yandex/cloud/vpc/v1"
 	ycsdk "github.com/yandex-cloud/go-sdk"
 	"gopkg.in/yaml.v2"
 )
@@ -170,7 +174,8 @@ func exportToCSV(resources []Folder) {
 				disc += disk.Size / (1 << 30)
 			}
 		}
-		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n" + "S3 - " + strconv.Itoa(folder.S3size) + " гб\n"})
+		// TODO: split string to multiple lines
+		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n" + "S3 - " + strconv.Itoa(folder.S3size) + " гб\n" + "IP-адрес - " + strconv.Itoa(folder.IpCount) + " шт"})
 		if err != nil {
 			panic(err)
 		}
@@ -202,6 +207,26 @@ func getS3size(ctx context.Context, folders []Folder) ([]Folder, error) {
 	return folders, nil
 }
 
+func getNetworkstats(ctx context.Context, folders []Folder) ([]Folder, error) {
+	token := getToken()
+	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
+		Credentials: ycsdk.OAuthToken(token),
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, folder := range folders {
+		actualFolder := &folders[i]
+		networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
+		if err != nil {
+			return nil, err
+		}
+		actualFolder.IpCount = len(networks.Addresses)
+	}
+
+	return folders, nil
+}
+
 func main() {
 	ctx := context.Background()
 	folders, err := getFoldersList(ctx)
@@ -213,6 +238,10 @@ func main() {
 		panic(err)
 	}
 	computeResources, err = getS3size(ctx, computeResources)
+	if err != nil {
+		panic(err)
+	}
+	computeResources, err = getNetworkstats(ctx, computeResources)
 	if err != nil {
 		panic(err)
 	}
