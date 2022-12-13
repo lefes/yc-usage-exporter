@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"flag"
 	"os"
 	"strconv"
 
@@ -33,6 +34,12 @@ type YandexCreds struct {
 	} `yaml:"profiles"`
 }
 
+type Cloud struct {
+	Name    string
+	Id      string
+	Folders []Folder
+}
+
 type Folder struct {
 	Name           string
 	Id             string
@@ -55,10 +62,21 @@ type Disk struct {
 	Size int
 }
 
-// TODO: Add support of take token from env and pass it as argument
 func getToken() string {
+	var token string
+	flag.StringVar(&token, "token", "",
+		"Yandex Cloud token")
+	flag.Parse()
+	if token != "" {
+		return token
+	}
+
+	token = os.Getenv("YANDEX_CLOUD_TOKEN")
+	if token != "" {
+		return token
+	}
+
 	var creds YandexCreds
-	// Reading token from yaml file
 	homeDir, _ := os.UserHomeDir()
 	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
 	if err != nil {
@@ -68,19 +86,15 @@ func getToken() string {
 	if err != nil {
 		panic(err)
 	}
+	if creds.Profiles.Default.Token == "" {
+		panic("No token found")
+	}
 	return creds.Profiles.Default.Token
 }
 
 // TODO: Add pagination support
 // TODO: Add support to muiltiple clouds
-func getFoldersList(ctx context.Context) ([]Folder, error) {
-	token := getToken()
-	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
-		Credentials: ycsdk.OAuthToken(token),
-	})
-	if err != nil {
-		return nil, err
-	}
+func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	clouds, err := sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{})
 	if err != nil {
 		return nil, err
@@ -105,14 +119,7 @@ func getFoldersList(ctx context.Context) ([]Folder, error) {
 
 // TODO: Add pagination support
 // TODO: Add goroutines with throttling and dynamic number of goroutines with default value
-func getComputeResources(ctx context.Context, folders []Folder) ([]Folder, error) {
-	token := getToken()
-	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
-		Credentials: ycsdk.OAuthToken(token),
-	})
-	if err != nil {
-		return nil, err
-	}
+func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
 	for i, folder := range folders {
 		actualFolder := &folders[i]
 		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
@@ -154,6 +161,7 @@ func getComputeResources(ctx context.Context, folders []Folder) ([]Folder, error
 
 // TODO: get out calculation of resources to separate function
 // TODO: Add option to set output file name
+// TODO: Add support of multiple clouds
 func exportToCSV(resources []Folder) {
 	f, err := os.Create("instances.csv")
 	if err != nil {
@@ -162,7 +170,10 @@ func exportToCSV(resources []Folder) {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-
+	err = w.Write([]string{"Folder", "CPU", "Memory", "Disc"})
+	if err != nil {
+		panic(err)
+	}
 	for _, folder := range resources {
 		cpus := 0
 		memory := 0
@@ -174,22 +185,19 @@ func exportToCSV(resources []Folder) {
 				disc += disk.Size / (1 << 30)
 			}
 		}
-		// TODO: split string to multiple lines
-		err := w.Write([]string{folder.Name, "CPU - " + strconv.Itoa(cpus) + " шт\n" + "RAM - " + strconv.Itoa(memory) + " гб\n" + "Disk - " + strconv.Itoa(disc) + " гб\n" + "S3 - " + strconv.Itoa(folder.S3size) + " гб\n" + "IP-адрес - " + strconv.Itoa(folder.IpCount) + " шт"})
+		err := w.Write([]string{
+			folder.Name,
+			strconv.Itoa(cpus),
+			strconv.Itoa(memory),
+			strconv.Itoa(disc),
+		})
 		if err != nil {
 			panic(err)
 		}
 	}
 }
 
-func getS3size(ctx context.Context, folders []Folder) ([]Folder, error) {
-	token := getToken()
-	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
-		Credentials: ycsdk.OAuthToken(token),
-	})
-	if err != nil {
-		return nil, err
-	}
+func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
 	for i, folder := range folders {
 		actualFolder := &folders[i]
 		s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
@@ -207,14 +215,7 @@ func getS3size(ctx context.Context, folders []Folder) ([]Folder, error) {
 	return folders, nil
 }
 
-func getNetworkstats(ctx context.Context, folders []Folder) ([]Folder, error) {
-	token := getToken()
-	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
-		Credentials: ycsdk.OAuthToken(token),
-	})
-	if err != nil {
-		return nil, err
-	}
+func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
 	for i, folder := range folders {
 		actualFolder := &folders[i]
 		networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
@@ -229,19 +230,26 @@ func getNetworkstats(ctx context.Context, folders []Folder) ([]Folder, error) {
 
 func main() {
 	ctx := context.Background()
-	folders, err := getFoldersList(ctx)
+	token := getToken()
+	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
+		Credentials: ycsdk.OAuthToken(token),
+	})
 	if err != nil {
 		panic(err)
 	}
-	computeResources, err := getComputeResources(ctx, folders)
+	folders, err := getFoldersList(sdk, ctx)
 	if err != nil {
 		panic(err)
 	}
-	computeResources, err = getS3size(ctx, computeResources)
+	computeResources, err := getComputeResources(sdk, ctx, folders)
 	if err != nil {
 		panic(err)
 	}
-	computeResources, err = getNetworkstats(ctx, computeResources)
+	computeResources, err = getS3size(sdk, ctx, computeResources)
+	if err != nil {
+		panic(err)
+	}
+	computeResources, err = getNetworkstats(sdk, ctx, computeResources)
 	if err != nil {
 		panic(err)
 	}
