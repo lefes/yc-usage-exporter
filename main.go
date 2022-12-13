@@ -4,6 +4,8 @@
 // TODO: Refactor passing of structer []Folder to functions
 // Maybe it's better to pass it as pointer?
 // Maybe TODO: bind some of the functions to Folder struct?
+// Maybe TODO: remove custom struct and use yandex-cloud structs?
+// TODO: Add work with labels and tags on resources
 package main
 
 import (
@@ -140,16 +142,29 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	return folders, nil
 }
 
-// TODO: Add pagination support
 // TODO: Add goroutines with throttling and dynamic number of goroutines with default value
 func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
 	for i, folder := range folders {
 		actualFolder := &folders[i]
+		var instances []*compute.Instance
 		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
 		if err != nil {
 			return nil, err
 		}
-		for _, computeResource := range computeResources.Instances {
+		instances = append(instances, computeResources.Instances...)
+		for computeResources.NextPageToken != "" {
+			computeResources, err = sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{
+				FolderId:  folder.Id,
+				PageToken: computeResources.NextPageToken,
+				PageSize:  1000,
+			})
+			if err != nil {
+				return nil, err
+			}
+			instances = append(instances, computeResources.Instances...)
+		}
+
+		for _, computeResource := range instances {
 			instance := Instance{
 				Name:     computeResource.Name,
 				CPU:      int(computeResource.Resources.Cores),
