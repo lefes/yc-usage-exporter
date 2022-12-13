@@ -41,6 +41,7 @@ type Cloud struct {
 }
 
 type Folder struct {
+	CloudName      string
 	Name           string
 	Id             string
 	Instances      []Instance `json:"instances"`
@@ -92,24 +93,46 @@ func getToken() string {
 	return creds.Profiles.Default.Token
 }
 
-// TODO: Add pagination support
-// TODO: Add support to muiltiple clouds
 func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
-	clouds, err := sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{})
+	var clouds []*resourcemanager.Cloud
+	cloudList, err := sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{})
 	if err != nil {
 		return nil, err
 	}
-	folders := make([]Folder, 0)
-	for _, cloud := range clouds.Clouds {
-		cloudFolders, err := sdk.ResourceManager().Folder().List(ctx, &resourcemanager.ListFoldersRequest{CloudId: cloud.Id})
+	clouds = append(clouds, cloudList.Clouds...)
+	for cloudList.NextPageToken != "" {
+		cloudList, err = sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{
+			PageToken: cloudList.NextPageToken,
+		})
 		if err != nil {
 			return nil, err
 		}
-		for _, folder := range cloudFolders.Folders {
+		clouds = append(clouds, cloudList.Clouds...)
+	}
+	folders := make([]Folder, 0)
+	for _, cloud := range clouds {
+		var cloudFolders []*resourcemanager.Folder
+		folderList, err := sdk.ResourceManager().Folder().List(ctx, &resourcemanager.ListFoldersRequest{CloudId: cloud.Id})
+		if err != nil {
+			return nil, err
+		}
+		cloudFolders = append(cloudFolders, folderList.Folders...)
+		for folderList.NextPageToken != "" {
+			folderList, err = sdk.ResourceManager().Folder().List(ctx, &resourcemanager.ListFoldersRequest{
+				CloudId:   cloud.Id,
+				PageToken: folderList.NextPageToken,
+			})
+			if err != nil {
+				return nil, err
+			}
+			cloudFolders = append(cloudFolders, folderList.Folders...)
+		}
 
+		for _, folder := range cloudFolders {
 			folders = append(folders, Folder{
-				Name: folder.Name,
-				Id:   folder.Id,
+				CloudName: cloud.Name,
+				Name:      folder.Name,
+				Id:        folder.Id,
 			})
 		}
 
@@ -170,7 +193,7 @@ func exportToCSV(resources []Folder) {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	err = w.Write([]string{"Folder", "CPU", "Memory", "Disc"})
+	err = w.Write([]string{"Cloud", "Folder", "CPU (cores)", "Memory (Gb)", "Disc (Gb)", "S3 (Gb)", "IPs"})
 	if err != nil {
 		panic(err)
 	}
@@ -186,10 +209,13 @@ func exportToCSV(resources []Folder) {
 			}
 		}
 		err := w.Write([]string{
+			folder.CloudName,
 			folder.Name,
 			strconv.Itoa(cpus),
 			strconv.Itoa(memory),
 			strconv.Itoa(disc),
+			strconv.Itoa(folder.S3size),
+			strconv.Itoa(folder.IpCount),
 		})
 		if err != nil {
 			panic(err)
