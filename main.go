@@ -65,36 +65,6 @@ type Disk struct {
 	Size int
 }
 
-func getToken() string {
-	var token string
-	flag.StringVar(&token, "token", "",
-		"Yandex Cloud token")
-	flag.Parse()
-	if token != "" {
-		return token
-	}
-
-	token = os.Getenv("YANDEX_CLOUD_TOKEN")
-	if token != "" {
-		return token
-	}
-
-	var creds YandexCreds
-	homeDir, _ := os.UserHomeDir()
-	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
-	if err != nil {
-		panic(err)
-	}
-	err = yaml.Unmarshal(credsFile, &creds)
-	if err != nil {
-		panic(err)
-	}
-	if creds.Profiles.Default.Token == "" {
-		panic("No token found")
-	}
-	return creds.Profiles.Default.Token
-}
-
 func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	var clouds []*resourcemanager.Cloud
 	cloudList, err := sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{})
@@ -198,10 +168,8 @@ func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) 
 }
 
 // TODO: get out calculation of resources to separate function
-// TODO: Add option to set output file name
-// TODO: Add support of multiple clouds
-func exportToCSV(resources []Folder) {
-	f, err := os.Create("instances.csv")
+func exportToCSV(resources []Folder, outputFileName string) {
+	f, err := os.Create(outputFileName)
 	if err != nil {
 		panic(err)
 	}
@@ -269,9 +237,41 @@ func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]F
 	return folders, nil
 }
 
+func parsingArgs() (string, string) {
+	var token string
+	var outputFileName string
+	flag.StringVar(&token, "token", "", "Yandex cloud token")
+	flag.StringVar(&outputFileName, "output", "", "Output file name")
+	flag.Parse()
+	if outputFileName == "" {
+		outputFileName = "instances.csv"
+	}
+	if token != "" {
+		return token, outputFileName
+	}
+	token = os.Getenv("YANDEX_CLOUD_TOKEN")
+	if token != "" {
+		return token, outputFileName
+	}
+	var creds YandexCreds
+	homeDir, _ := os.UserHomeDir()
+	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
+	if err != nil {
+		panic(err)
+	}
+	err = yaml.Unmarshal(credsFile, &creds)
+	if err != nil {
+		panic(err)
+	}
+	if creds.Profiles.Default.Token == "" {
+		panic("No token found")
+	}
+	return creds.Profiles.Default.Token, outputFileName
+}
+
 func main() {
+	token, outputFileName := parsingArgs()
 	ctx := context.Background()
-	token := getToken()
 	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
 		Credentials: ycsdk.OAuthToken(token),
 	})
@@ -295,6 +295,6 @@ func main() {
 		panic(err)
 	}
 
-	exportToCSV(computeResources)
+	exportToCSV(computeResources, outputFileName)
 
 }
