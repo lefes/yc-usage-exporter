@@ -1,4 +1,3 @@
-// TODO: Add proper logging
 // TODO: Refactor error handling
 // TODO: Separate functions to smaller ones for better reusability
 // TODO: Refactor passing of structer []Folder to functions
@@ -12,9 +11,12 @@ import (
 	"context"
 	"encoding/csv"
 	"flag"
+	"log"
 	"os"
 	"strconv"
+	"time"
 
+	"github.com/cheggaaa/pb/v3"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/compute/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/resourcemanager/v1"
 	"github.com/yandex-cloud/go-genproto/yandex/cloud/storage/v1"
@@ -66,6 +68,7 @@ type Disk struct {
 }
 
 func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
+	log.Print("Getting cloud list...")
 	var clouds []*resourcemanager.Cloud
 	cloudList, err := sdk.ResourceManager().Cloud().List(ctx, &resourcemanager.ListCloudsRequest{})
 	if err != nil {
@@ -81,6 +84,8 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 		}
 		clouds = append(clouds, cloudList.Clouds...)
 	}
+	log.Printf("Found %d clouds", len(clouds))
+	log.Print("Getting folders list...")
 	folders := make([]Folder, 0)
 	for _, cloud := range clouds {
 		var cloudFolders []*resourcemanager.Folder
@@ -109,12 +114,16 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 		}
 
 	}
+	log.Printf("Found %d folders", len(folders))
 	return folders, nil
 }
 
 // TODO: Add goroutines with throttling and dynamic number of goroutines with default value
 func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	bar := pb.StartNew(count)
 	for i, folder := range folders {
+		bar.Increment()
 		actualFolder := &folders[i]
 		var instances []*compute.Instance
 		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
@@ -164,6 +173,8 @@ func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) 
 			actualFolder.Instances = append(actualFolder.Instances, instance)
 		}
 	}
+	bar.Finish()
+	log.Print("Compute resources collected")
 	return folders, nil
 }
 
@@ -204,10 +215,14 @@ func exportToCSV(resources []Folder, outputFileName string) {
 			panic(err)
 		}
 	}
+	log.Print("CSV file exported")
 }
 
 func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	bar := pb.StartNew(count)
 	for i, folder := range folders {
+		bar.Increment()
 		actualFolder := &folders[i]
 		s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
 		if err != nil {
@@ -221,11 +236,16 @@ func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder,
 			actualFolder.S3size += int(size.UsedSize / (1 << 30))
 		}
 	}
+	bar.Finish()
+	log.Printf("S3 size collected")
 	return folders, nil
 }
 
 func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	bar := pb.StartNew(count)
 	for i, folder := range folders {
+		bar.Increment()
 		actualFolder := &folders[i]
 		networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
 		if err != nil {
@@ -233,11 +253,14 @@ func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]F
 		}
 		actualFolder.IpCount = len(networks.Addresses)
 	}
+	bar.Finish()
+	log.Printf("Network stats collected")
 
 	return folders, nil
 }
 
 func parsingArgs() (string, string) {
+	log.Printf("Parsing args...")
 	var token string
 	var outputFileName string
 	flag.StringVar(&token, "token", "", "Yandex cloud token")
@@ -266,11 +289,20 @@ func parsingArgs() (string, string) {
 	if creds.Profiles.Default.Token == "" {
 		panic("No token found")
 	}
+	log.Printf("Token found")
+	log.Printf("Output file name: %s", outputFileName)
 	return creds.Profiles.Default.Token, outputFileName
 }
 
 func main() {
+	log.Print("Starting...")
+	t := time.Now()
+	defer func() {
+		log.Printf("Done in %s", time.Since(t))
+	}()
+	log.Print("Parsing args...")
 	token, outputFileName := parsingArgs()
+	log.Print("Building sdk...")
 	ctx := context.Background()
 	sdk, err := ycsdk.Build(ctx, ycsdk.Config{
 		Credentials: ycsdk.OAuthToken(token),
@@ -278,23 +310,26 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	log.Print("Getting folders...")
 	folders, err := getFoldersList(sdk, ctx)
 	if err != nil {
 		panic(err)
 	}
+	log.Print("Getting compute resources...")
 	computeResources, err := getComputeResources(sdk, ctx, folders)
 	if err != nil {
 		panic(err)
 	}
+	log.Print("Getting S3 size...")
 	computeResources, err = getS3size(sdk, ctx, computeResources)
 	if err != nil {
 		panic(err)
 	}
+	log.Print("Getting network stats...")
 	computeResources, err = getNetworkstats(sdk, ctx, computeResources)
 	if err != nil {
 		panic(err)
 	}
-
+	log.Print("Exporting to csv...")
 	exportToCSV(computeResources, outputFileName)
-
 }
