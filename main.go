@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cheggaaa/pb/v3"
@@ -118,61 +119,90 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	return folders, nil
 }
 
-// TODO: Add goroutines with throttling and dynamic number of goroutines with default value
-func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	bar := pb.StartNew(count)
-	for i, folder := range folders {
-		actualFolder := &folders[i]
-		var instances []*compute.Instance
-		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
+func worker(id int, wg *sync.WaitGroup, foldersChannel <-chan *Folder, sdk *ycsdk.SDK, ctx context.Context, bar *pb.ProgressBar, mu *sync.RWMutex) {
+	for folder := range foldersChannel {
+		err := calculateFolder(folder, sdk, ctx, mu)
 		if err != nil {
-			return nil, err
+			log.Printf("Error while calculating folder %s: %s", folder.Name, err)
+		}
+		mu.Lock()
+		bar.Increment()
+		mu.Unlock()
+	}
+	wg.Done()
+}
+
+func calculateFolder(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
+	var instances []*compute.Instance
+
+	computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
+	if err != nil {
+		return err
+	}
+	instances = append(instances, computeResources.Instances...)
+
+	for computeResources.NextPageToken != "" {
+		computeResources, err = sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{
+			FolderId:  folder.Id,
+			PageToken: computeResources.NextPageToken,
+			PageSize:  1000,
+		})
+		if err != nil {
+			return err
 		}
 		instances = append(instances, computeResources.Instances...)
-		for computeResources.NextPageToken != "" {
-			computeResources, err = sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{
-				FolderId:  folder.Id,
-				PageToken: computeResources.NextPageToken,
-				PageSize:  1000,
-			})
-			if err != nil {
-				return nil, err
-			}
-			instances = append(instances, computeResources.Instances...)
-		}
+	}
 
-		for _, computeResource := range instances {
-			instance := Instance{
-				Name:     computeResource.Name,
-				CPU:      int(computeResource.Resources.Cores),
-				Memory:   int(computeResource.Resources.Memory),
-				Fraction: int(computeResource.Resources.CoreFraction),
-			}
-			// Getting boot disk size
-			bootDisk, err := sdk.Compute().Disk().Get(ctx, &compute.GetDiskRequest{DiskId: computeResource.BootDisk.DiskId})
+	for _, computeResource := range instances {
+		instance := Instance{
+			Name:     computeResource.Name,
+			CPU:      int(computeResource.Resources.Cores),
+			Memory:   int(computeResource.Resources.Memory),
+			Fraction: int(computeResource.Resources.CoreFraction),
+		}
+		// Getting boot disk size
+		bootDisk, err := sdk.Compute().Disk().Get(ctx, &compute.GetDiskRequest{DiskId: computeResource.BootDisk.DiskId})
+		if err != nil {
+			return err
+		}
+		instance.Disks = append(instance.Disks, Disk{
+			Name: bootDisk.Name,
+			Size: int(bootDisk.Size),
+		})
+		// Getting Secondary disks size
+		for _, disk := range computeResource.SecondaryDisks {
+			secondaryDisk, err := sdk.Compute().Disk().Get(ctx, &compute.GetDiskRequest{DiskId: disk.DiskId})
 			if err != nil {
-				return nil, err
+				return err
 			}
 			instance.Disks = append(instance.Disks, Disk{
-				Name: bootDisk.Name,
-				Size: int(bootDisk.Size),
+				Name: secondaryDisk.Name,
+				Size: int(secondaryDisk.Size),
 			})
-			// Getting Secondary disks size
-			for _, disk := range computeResource.SecondaryDisks {
-				secondaryDisk, err := sdk.Compute().Disk().Get(ctx, &compute.GetDiskRequest{DiskId: disk.DiskId})
-				if err != nil {
-					return nil, err
-				}
-				instance.Disks = append(instance.Disks, Disk{
-					Name: secondaryDisk.Name,
-					Size: int(secondaryDisk.Size),
-				})
-			}
-			actualFolder.Instances = append(actualFolder.Instances, instance)
 		}
-		bar.Increment()
+		mu.Lock()
+		folder.Instances = append(folder.Instances, instance)
+		mu.Unlock()
 	}
+	return nil
+}
+
+func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	var wg sync.WaitGroup
+	var mu sync.RWMutex
+	const workers = 10
+	bar := pb.StartNew(count)
+	wg.Add(workers)
+	foldersChannel := make(chan *Folder, workers)
+	for i := 0; i < workers; i++ {
+		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu)
+	}
+	for i := range folders {
+		foldersChannel <- &folders[i]
+	}
+	close(foldersChannel)
+	wg.Wait()
 	bar.Finish()
 	log.Print("Compute resources collected")
 	return folders, nil
