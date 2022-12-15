@@ -123,7 +123,6 @@ func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) 
 	count := len(folders)
 	bar := pb.StartNew(count)
 	for i, folder := range folders {
-		bar.Increment()
 		actualFolder := &folders[i]
 		var instances []*compute.Instance
 		computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
@@ -172,13 +171,13 @@ func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) 
 			}
 			actualFolder.Instances = append(actualFolder.Instances, instance)
 		}
+		bar.Increment()
 	}
 	bar.Finish()
 	log.Print("Compute resources collected")
 	return folders, nil
 }
 
-// TODO: get out calculation of resources to separate function
 func exportToCSV(resources []Folder, outputFileName string) {
 	f, err := os.Create(outputFileName)
 	if err != nil {
@@ -222,7 +221,6 @@ func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder,
 	count := len(folders)
 	bar := pb.StartNew(count)
 	for i, folder := range folders {
-		bar.Increment()
 		actualFolder := &folders[i]
 		s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
 		if err != nil {
@@ -235,6 +233,7 @@ func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder,
 			}
 			actualFolder.S3size += int(size.UsedSize / (1 << 30))
 		}
+		bar.Increment()
 	}
 	bar.Finish()
 	log.Printf("S3 size collected")
@@ -245,13 +244,13 @@ func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]F
 	count := len(folders)
 	bar := pb.StartNew(count)
 	for i, folder := range folders {
-		bar.Increment()
 		actualFolder := &folders[i]
 		networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
 		if err != nil {
 			return nil, err
 		}
 		actualFolder.IpCount = len(networks.Addresses)
+		bar.Increment()
 	}
 	bar.Finish()
 	log.Printf("Network stats collected")
