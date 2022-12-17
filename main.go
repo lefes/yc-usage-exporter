@@ -68,7 +68,7 @@ type Disk struct {
 	Size int
 }
 
-func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
+func getCloudList(sdk *ycsdk.SDK, ctx context.Context) ([]Cloud, error) {
 	log.Print("Getting cloud list...")
 	var clouds []*resourcemanager.Cloud
 
@@ -89,6 +89,24 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	}
 
 	log.Printf("Found %d clouds", len(clouds))
+
+	cloudsList := make([]Cloud, 0)
+	for _, cloud := range clouds {
+		cloudsList = append(cloudsList, Cloud{
+			Name: cloud.Name,
+			Id:   cloud.Id,
+		})
+	}
+
+	return cloudsList, nil
+}
+
+func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
+	clouds, err := getCloudList(sdk, ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	log.Print("Getting folders list...")
 
 	folders := make([]Folder, 0)
