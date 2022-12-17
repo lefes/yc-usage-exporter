@@ -7,6 +7,9 @@
 // TODO: Add work with labels and tags on resources
 // TODO: Rework workers functions to remove code duplication
 // TODO: Add log levels
+// TODO: Add README
+// TODO: Add pre-commit hooks
+// TODO: Refactore naming
 package main
 
 import (
@@ -111,27 +114,51 @@ func parsingArgs() (string, string) {
 	return creds.Profiles.Default.Token, outputFileName
 }
 
-func worker(
-	id int,
-	wg *sync.WaitGroup,
-	foldersChannel <-chan *Folder,
+func workerGroup(
 	sdk *ycsdk.SDK,
 	ctx context.Context,
-	bar *pb.ProgressBar,
-	mu *sync.RWMutex,
-	calculate func(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error,
-) {
-	for folder := range foldersChannel {
-		err := calculate(folder, sdk, ctx, mu)
-		if err != nil {
-			log.Printf("Error while calculating folder %s: %s", folder.Name, err)
-		}
-
-		mu.Lock()
-		bar.Increment()
-		mu.Unlock()
+	folders []Folder,
+	calculateFunction func(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error,
+) ([]Folder, error) {
+	log.Print("Starting workers...")
+	count := len(folders)
+	var wg sync.WaitGroup
+	var mu sync.RWMutex
+	const workers = 10
+	foldersChannel := make(chan *Folder, workers)
+	bar := pb.StartNew(count)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(
+			id int,
+			foldersChannel <-chan *Folder,
+			sdk *ycsdk.SDK,
+			ctx context.Context,
+			mu *sync.RWMutex,
+			calculateFunction func(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error,
+		) {
+			for folder := range foldersChannel {
+				err := calculateFunction(folder, sdk, ctx, mu)
+				if err != nil {
+					log.Printf("Error while calculating folder %s: %s", folder.Name, err)
+				}
+				mu.Lock()
+				bar.Increment()
+				mu.Unlock()
+			}
+			wg.Done()
+		}(i, foldersChannel, sdk, ctx, &mu, calculateFunction)
 	}
-	wg.Done()
+
+	for i := range folders {
+		foldersChannel <- &folders[i]
+	}
+
+	close(foldersChannel)
+	wg.Wait()
+	bar.Finish()
+	log.Print("Compute resources collected")
+	return folders, nil
 }
 
 func getCloudList(sdk *ycsdk.SDK, ctx context.Context) ([]Cloud, error) {
@@ -209,29 +236,6 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	return folders, nil
 }
 
-func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	var wg sync.WaitGroup
-	var mu sync.RWMutex
-	const workers = 10
-	foldersChannel := make(chan *Folder, workers)
-	bar := pb.StartNew(count)
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateComputeResources)
-	}
-
-	for i := range folders {
-		foldersChannel <- &folders[i]
-	}
-
-	close(foldersChannel)
-	wg.Wait()
-	bar.Finish()
-	log.Print("Compute resources collected")
-	return folders, nil
-}
-
 func calculateComputeResources(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
 	var instances []*compute.Instance
 
@@ -290,29 +294,6 @@ func calculateComputeResources(folder *Folder, sdk *ycsdk.SDK, ctx context.Conte
 	return nil
 }
 
-func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	var wg sync.WaitGroup
-	var mu sync.RWMutex
-	const workers = 10
-	foldersChannel := make(chan *Folder, workers)
-	bar := pb.StartNew(count)
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateS3size)
-	}
-
-	for i := range folders {
-		foldersChannel <- &folders[i]
-	}
-
-	close(foldersChannel)
-	wg.Wait()
-	bar.Finish()
-	log.Print("S3 size collected")
-	return folders, nil
-}
-
 func calculateS3size(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
 	s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
 	if err != nil {
@@ -329,29 +310,6 @@ func calculateS3size(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sy
 		mu.Unlock()
 	}
 	return nil
-}
-
-func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	var wg sync.WaitGroup
-	var mu sync.RWMutex
-	const workers = 10
-	foldersChannel := make(chan *Folder, workers)
-	bar := pb.StartNew(count)
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateNetworkstats)
-	}
-
-	for i := range folders {
-		foldersChannel <- &folders[i]
-	}
-
-	close(foldersChannel)
-	wg.Wait()
-	bar.Finish()
-	log.Print("Network stats collected")
-	return folders, nil
 }
 
 func calculateNetworkstats(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
@@ -436,19 +394,19 @@ func main() {
 	}
 
 	log.Print("Getting compute resources...")
-	computeResources, err := getComputeResources(sdk, ctx, folders)
+	computeResources, err := workerGroup(sdk, ctx, folders, calculateComputeResources)
 	if err != nil {
 		panic(err)
 	}
 
 	log.Print("Getting S3 size...")
-	computeResources, err = getS3size(sdk, ctx, computeResources)
+	computeResources, err = workerGroup(sdk, ctx, computeResources, calculateS3size)
 	if err != nil {
 		panic(err)
 	}
 
 	log.Print("Getting network stats...")
-	computeResources, err = getNetworkstats(sdk, ctx, computeResources)
+	computeResources, err = workerGroup(sdk, ctx, computeResources, calculateNetworkstats)
 	if err != nil {
 		panic(err)
 	}
