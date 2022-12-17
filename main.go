@@ -5,6 +5,7 @@
 // Maybe TODO: bind some of the functions to Folder struct?
 // Maybe TODO: remove custom struct and use yandex-cloud structs?
 // TODO: Add work with labels and tags on resources
+// TODO: Rework workers functions to remove code duplication
 package main
 
 import (
@@ -66,6 +67,70 @@ type Instance struct {
 type Disk struct {
 	Name string
 	Size int
+}
+
+func parsingArgs() (string, string) {
+	log.Printf("Parsing args...")
+	var token string
+	var outputFileName string
+	// Parsing args
+	flag.StringVar(&token, "token", "", "Yandex cloud token")
+	flag.StringVar(&outputFileName, "output", "", "Output file name")
+	flag.Parse()
+	if outputFileName == "" {
+		outputFileName = "instances.csv"
+	}
+	if token != "" {
+		return token, outputFileName
+	}
+
+	// Parsing env
+	token = os.Getenv("YANDEX_CLOUD_TOKEN")
+	if token != "" {
+		return token, outputFileName
+	}
+
+	// Parsing config file
+	var creds YandexCreds
+	homeDir, _ := os.UserHomeDir()
+	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
+	if err != nil {
+		panic(err)
+	}
+
+	err = yaml.Unmarshal(credsFile, &creds)
+	if err != nil {
+		panic(err)
+	}
+	if creds.Profiles.Default.Token == "" {
+		panic("No token found")
+	}
+	log.Printf("Token found")
+	log.Printf("Output file name: %s", outputFileName)
+	return creds.Profiles.Default.Token, outputFileName
+}
+
+func worker(
+	id int,
+	wg *sync.WaitGroup,
+	foldersChannel <-chan *Folder,
+	sdk *ycsdk.SDK,
+	ctx context.Context,
+	bar *pb.ProgressBar,
+	mu *sync.RWMutex,
+	calculate func(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error,
+) {
+	for folder := range foldersChannel {
+		err := calculate(folder, sdk, ctx, mu)
+		if err != nil {
+			log.Printf("Error while calculating folder %s: %s", folder.Name, err)
+		}
+
+		mu.Lock()
+		bar.Increment()
+		mu.Unlock()
+	}
+	wg.Done()
 }
 
 func getCloudList(sdk *ycsdk.SDK, ctx context.Context) ([]Cloud, error) {
@@ -143,21 +208,30 @@ func getFoldersList(sdk *ycsdk.SDK, ctx context.Context) ([]Folder, error) {
 	return folders, nil
 }
 
-func worker(id int, wg *sync.WaitGroup, foldersChannel <-chan *Folder, sdk *ycsdk.SDK, ctx context.Context, bar *pb.ProgressBar, mu *sync.RWMutex) {
-	for folder := range foldersChannel {
-		err := calculateFolder(folder, sdk, ctx, mu)
-		if err != nil {
-			log.Printf("Error while calculating folder %s: %s", folder.Name, err)
-		}
-
-		mu.Lock()
-		bar.Increment()
-		mu.Unlock()
+func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	var wg sync.WaitGroup
+	var mu sync.RWMutex
+	const workers = 10
+	foldersChannel := make(chan *Folder, workers)
+	bar := pb.StartNew(count)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateComputeResources)
 	}
-	wg.Done()
+
+	for i := range folders {
+		foldersChannel <- &folders[i]
+	}
+
+	close(foldersChannel)
+	wg.Wait()
+	bar.Finish()
+	log.Print("Compute resources collected")
+	return folders, nil
 }
 
-func calculateFolder(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
+func calculateComputeResources(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
 	var instances []*compute.Instance
 
 	computeResources, err := sdk.Compute().Instance().List(ctx, &compute.ListInstancesRequest{FolderId: folder.Id})
@@ -215,17 +289,16 @@ func calculateFolder(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sy
 	return nil
 }
 
-func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
 	count := len(folders)
 	var wg sync.WaitGroup
 	var mu sync.RWMutex
 	const workers = 10
 	foldersChannel := make(chan *Folder, workers)
 	bar := pb.StartNew(count)
-
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu)
+		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateS3size)
 	}
 
 	for i := range folders {
@@ -235,8 +308,62 @@ func getComputeResources(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) 
 	close(foldersChannel)
 	wg.Wait()
 	bar.Finish()
-	log.Print("Compute resources collected")
+	log.Print("S3 size collected")
 	return folders, nil
+}
+
+func calculateS3size(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
+	s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
+	if err != nil {
+		return err
+	}
+
+	for _, bucket := range s3.Buckets {
+		size, err := sdk.StorageAPI().Bucket().GetStats(ctx, &storage.GetBucketStatsRequest{Name: bucket.Name})
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		folder.S3size += int(size.UsedSize / (1 << 30))
+		mu.Unlock()
+	}
+	return nil
+}
+
+func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
+	count := len(folders)
+	var wg sync.WaitGroup
+	var mu sync.RWMutex
+	const workers = 10
+	foldersChannel := make(chan *Folder, workers)
+	bar := pb.StartNew(count)
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go worker(i, &wg, foldersChannel, sdk, ctx, bar, &mu, calculateNetworkstats)
+	}
+
+	for i := range folders {
+		foldersChannel <- &folders[i]
+	}
+
+	close(foldersChannel)
+	wg.Wait()
+	bar.Finish()
+	log.Print("Network stats collected")
+	return folders, nil
+}
+
+func calculateNetworkstats(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, mu *sync.RWMutex) error {
+	networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
+	if err != nil {
+		return err
+	}
+
+	mu.Lock()
+	folder.IpCount = len(networks.Addresses)
+	mu.Unlock()
+
+	return nil
 }
 
 func exportToCSV(resources []Folder, outputFileName string) {
@@ -279,93 +406,6 @@ func exportToCSV(resources []Folder, outputFileName string) {
 		}
 	}
 	log.Print("CSV file exported")
-}
-
-func getS3size(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	bar := pb.StartNew(count)
-
-	for i, folder := range folders {
-		actualFolder := &folders[i]
-		s3, err := sdk.StorageAPI().Bucket().List(ctx, &storage.ListBucketsRequest{FolderId: folder.Id})
-		if err != nil {
-			return nil, err
-		}
-
-		for _, bucket := range s3.Buckets {
-			size, err := sdk.StorageAPI().Bucket().GetStats(ctx, &storage.GetBucketStatsRequest{Name: bucket.Name})
-			if err != nil {
-				return nil, err
-			}
-			actualFolder.S3size += int(size.UsedSize / (1 << 30))
-		}
-
-		bar.Increment()
-	}
-	bar.Finish()
-	log.Printf("S3 size collected")
-	return folders, nil
-}
-
-func getNetworkstats(sdk *ycsdk.SDK, ctx context.Context, folders []Folder) ([]Folder, error) {
-	count := len(folders)
-	bar := pb.StartNew(count)
-
-	for i, folder := range folders {
-		actualFolder := &folders[i]
-		networks, err := sdk.VPC().Address().List(ctx, &vpc.ListAddressesRequest{FolderId: folder.Id})
-		if err != nil {
-			return nil, err
-		}
-
-		actualFolder.IpCount = len(networks.Addresses)
-		bar.Increment()
-	}
-	bar.Finish()
-	log.Printf("Network stats collected")
-
-	return folders, nil
-}
-
-func parsingArgs() (string, string) {
-	log.Printf("Parsing args...")
-	var token string
-	var outputFileName string
-	// Parsing args
-	flag.StringVar(&token, "token", "", "Yandex cloud token")
-	flag.StringVar(&outputFileName, "output", "", "Output file name")
-	flag.Parse()
-	if outputFileName == "" {
-		outputFileName = "instances.csv"
-	}
-	if token != "" {
-		return token, outputFileName
-	}
-
-	// Parsing env
-	token = os.Getenv("YANDEX_CLOUD_TOKEN")
-	if token != "" {
-		return token, outputFileName
-	}
-
-	// Parsing config file
-	var creds YandexCreds
-	homeDir, _ := os.UserHomeDir()
-	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
-	if err != nil {
-		panic(err)
-	}
-
-	err = yaml.Unmarshal(credsFile, &creds)
-	if err != nil {
-		panic(err)
-	}
-	if creds.Profiles.Default.Token == "" {
-		panic("No token found")
-	}
-	log.Printf("Token found")
-	log.Printf("Output file name: %s", outputFileName)
-	return creds.Profiles.Default.Token, outputFileName
 }
 
 func main() {
