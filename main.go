@@ -6,6 +6,7 @@
 // Maybe TODO: remove custom struct and use yandex-cloud structs?
 // TODO: Add work with labels and tags on resources
 // TODO: Rework workers functions to remove code duplication
+// TODO: Add log levels
 package main
 
 import (
