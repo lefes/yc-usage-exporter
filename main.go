@@ -8,7 +8,6 @@
 // TODO: Rework workers functions to remove code duplication
 // TODO: Add log levels
 // TODO: Add README
-// TODO: Add pre-commit hooks
 // TODO: Refactore naming
 package main
 
@@ -16,9 +15,12 @@ import (
 	"context"
 	"encoding/csv"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,8 +83,13 @@ func parsingArgs() (string, string) {
 	flag.StringVar(&token, "token", "", "Yandex cloud token")
 	flag.StringVar(&outputFileName, "output", "", "Output file name")
 	flag.Parse()
+	// validating that path is safe
 	if outputFileName == "" {
 		outputFileName = "instances.csv"
+	}
+	outputFileName = filepath.Clean(outputFileName)
+	if strings.HasPrefix(outputFileName, "/") {
+		panic(fmt.Errorf("unsafe input. Use relative path"))
 	}
 	if token != "" {
 		return token, outputFileName
@@ -97,6 +104,8 @@ func parsingArgs() (string, string) {
 	// Parsing config file
 	var creds YandexCreds
 	homeDir, _ := os.UserHomeDir()
+	homeDir = filepath.Clean(homeDir)
+	//#nosec G304
 	credsFile, err := os.ReadFile(homeDir + "/" + ".config/yandex-cloud/config.yaml")
 	if err != nil {
 		panic(err)
@@ -326,11 +335,11 @@ func calculateNetworkstats(folder *Folder, sdk *ycsdk.SDK, ctx context.Context, 
 }
 
 func exportToCSV(resources []Folder, outputFileName string) {
+	//#nosec G304
 	f, err := os.Create(outputFileName)
 	if err != nil {
 		panic(err)
 	}
-	defer f.Close()
 
 	w := csv.NewWriter(f)
 	defer w.Flush()
@@ -363,6 +372,10 @@ func exportToCSV(resources []Folder, outputFileName string) {
 		if err != nil {
 			panic(err)
 		}
+	}
+	err = f.Close()
+	if err != nil {
+		panic(err)
 	}
 	log.Print("CSV file exported")
 }
