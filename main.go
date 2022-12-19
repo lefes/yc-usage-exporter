@@ -1,12 +1,3 @@
-// TODO: Separate functions to smaller ones for better reusability
-// TODO: Refactor passing of structer []Folder to functions
-// Maybe it's better to pass it as pointer?
-// Maybe TODO: bind some of the functions to Folder struct?
-// Maybe TODO: remove custom struct and use yandex-cloud structs?
-// TODO: Add work with labels and tags on resources
-// TODO: Add log levels
-// TODO: Add README
-// TODO: Refactore naming
 package main
 
 import (
