@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -107,7 +108,7 @@ func parsingArgs() (string, string, error) {
 	}
 	homeDir = filepath.Clean(homeDir)
 	configPath := homeDir + "/" + ".config/yandex-cloud/config.yaml"
-	if _, err = os.Stat(configPath); err == nil {
+	if _, err = os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
 		//#nosec G304
 		credsFile, err := os.ReadFile(configPath)
 		if err != nil {
@@ -117,6 +118,9 @@ func parsingArgs() (string, string, error) {
 		if err != nil {
 			return "", "", fmt.Errorf("parsingArgs: error while parsing yandex config file: %s", err)
 		}
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("parsingArgs: error while getting yandex config file: %s", err)
 	}
 
 	if creds.Profiles.Default.Token == "" {
